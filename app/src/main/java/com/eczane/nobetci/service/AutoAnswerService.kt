@@ -28,17 +28,19 @@ import com.eczane.nobetci.util.PrefsManager
 import com.eczane.nobetci.util.WhatsAppHelper
 
 /**
- * Nöbetçi Eczane IVR (Interactive Voice Response) Servisi.
+ * Eczane Telesekreter IVR Servisi.
  *
- * Akış:
- * 1. Gelen arama algılanır ve otomatik cevaplanır
- * 2. Hoparlör açılır
- * 3. Ses mesajı çalınır (eczane bilgileri + konum + yönlendirme)
- * 4. Mesaj sırasında arayan kişiye WhatsApp ile konum gönderilir
- * 5. DTMF tuş algılama başlar:
- *    - 1'e basarsa: Mesaj tekrar çalınır
- *    - 2'ye basarsa: Hoparlör kapanır, telefon çalar, eczacı devralır
- * 6. Hiçbir tuşa basılmazsa belirli süre sonra otomatik eczaneye bağlar
+ * Ses iletim yontemi:
+ * - Arama cevaplanir
+ * - Hoparlor (speakerphone) acilir
+ * - Ses mesaji STREAM_MUSIC kanalindan hoparlore verilir
+ * - Telefonun mikrofonu hoparlorden gelen sesi alir
+ * - Mikrofon sesi sebekeye (arayan kisiye) iletir
+ *
+ * NOT: STREAM_MUSIC kullanilmasinin sebebi:
+ * STREAM_VOICE_CALL kullanildiginda telefonun eko filtresi
+ * hoparlorden gelen sesi mikrofon sinyalinden cikariyor.
+ * STREAM_MUSIC eko filtresinden etkilenmez.
  */
 class AutoAnswerService : Service() {
 
@@ -57,19 +59,23 @@ class AutoAnswerService : Service() {
         private const val WHATSAPP_NOTIFICATION_ID = 1003
 
         private const val ANSWER_DELAY_MS = 1500L
-        // Tuşa basılmazsa otomatik bağlanma süresi (ms)
-        private const val AUTO_CONNECT_TIMEOUT_MS = 30000L // 30 saniye
+        // Arama cevaplanip hoparlor acilmadan once bekleme
+        // Cok onemli: Arama tam baglanmadan hoparlor acilmaz
+        private const val SPEAKER_DELAY_MS = 2000L
+        // Hoparlor acildiktan sonra mesaj baslamadan once bekleme
+        private const val PLAY_DELAY_MS = 500L
+        private const val AUTO_CONNECT_TIMEOUT_MS = 30000L
     }
 
     private var mediaPlayer: MediaPlayer? = null
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var audioManager: AudioManager
     private lateinit var prefs: PrefsManager
-    private var isPlaying = false
     private var currentCallerNumber: String = ""
     private var dtmfDetector: DtmfDetector? = null
     private var whatsappSent = false
     private var isConnectedToPharmacist = false
+    private var isMessagePlaying = false
 
     override fun onCreate() {
         super.onCreate()
@@ -85,17 +91,16 @@ class AutoAnswerService : Service() {
                 currentCallerNumber = phoneNumber
                 whatsappSent = false
                 isConnectedToPharmacist = false
-                Log.d(TAG, "Gelen arama isleniyor: $phoneNumber")
+                isMessagePlaying = false
+                Log.d(TAG, "Gelen arama: $phoneNumber")
 
                 startForeground(NOTIFICATION_ID, createForegroundNotification(phoneNumber))
 
-                handler.postDelayed({
-                    answerCall()
-                }, ANSWER_DELAY_MS)
+                handler.postDelayed({ answerCall() }, ANSWER_DELAY_MS)
             }
 
             ACTION_CALL_ENDED -> {
-                Log.d(TAG, "Arama sona erdi, temizleniyor")
+                Log.d(TAG, "Arama sona erdi")
                 cleanup()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -105,8 +110,8 @@ class AutoAnswerService : Service() {
                 val phoneNumber = intent.getStringExtra(EXTRA_PHONE_NUMBER) ?: ""
                 if (phoneNumber.isNotEmpty()) {
                     WhatsAppHelper.sendLocationMessage(this, phoneNumber, prefs)
-                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    nm.cancel(WHATSAPP_NOTIFICATION_ID)
+                    (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                        .cancel(WHATSAPP_NOTIFICATION_ID)
                 }
             }
         }
@@ -115,79 +120,82 @@ class AutoAnswerService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ========================
-    // ANA AKIŞ
-    // ========================
+    // ========================================
+    // ARAMA AKISI
+    // ========================================
 
     /**
-     * 1. Aramayı otomatik cevapla
+     * Adim 1: Aramayi cevapla
      */
     private fun answerCall() {
         try {
-            val telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            telecomManager.acceptRingingCall()
-            Log.d(TAG, "Arama cevaplaniyor...")
+            val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            tm.acceptRingingCall()
+            Log.d(TAG, "Arama cevaplandi, hoparlor bekleniyor...")
 
-            handler.postDelayed({
-                enableSpeakerAndPlay()
-            }, 1000L)
+            // Adim 2: Aramanin tam baglanmasini bekle, sonra hoparloru ac
+            handler.postDelayed({ enableSpeaker() }, SPEAKER_DELAY_MS)
 
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Arama cevaplanamadi - izin hatasi", e)
         } catch (e: Exception) {
             Log.e(TAG, "Arama cevaplanamadi", e)
         }
     }
 
     /**
-     * 2. Hoparlörü aç ve ses mesajını çal
+     * Adim 2: Hoparloru ac
      */
-    private fun enableSpeakerAndPlay() {
+    private fun enableSpeaker() {
         try {
-            audioManager.mode = AudioManager.MODE_IN_CALL
+            // Hoparloru ac - arayan kisinin sesini hoparlorden duymak
+            // ve bizim ses mesajimizi mikrofona yansitmak icin
             audioManager.isSpeakerphoneOn = true
 
-            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-            audioManager.setStreamVolume(
-                AudioManager.STREAM_VOICE_CALL,
-                (maxVolume * 0.8).toInt(),
-                0
-            )
+            // STREAM_MUSIC ses seviyesini MAKSIMUMA cek
+            // Bu kanal eko filtresinden etkilenmez
+            val maxMusic = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusic, 0)
 
-            Log.d(TAG, "Hoparlor acildi, ses mesaji caliniyor...")
-            playMessage()
+            // VOICE_CALL ses seviyesini de yukselt (arayan kisiyi duymak icin)
+            val maxVoice = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+            audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoice, 0)
 
-            // WhatsApp konum gönder (mesaj çalarken)
+            Log.d(TAG, "Hoparlor ACIK, ses MAKSIMUM")
+
+            // Adim 3: Kisa bir bekleme sonra mesaji cal
+            handler.postDelayed({ playMessage() }, PLAY_DELAY_MS)
+
+            // WhatsApp konum gonder
             sendWhatsAppLocationAuto()
 
         } catch (e: Exception) {
-            Log.e(TAG, "Hoparlor/ses hatasi", e)
+            Log.e(TAG, "Hoparlor hatasi", e)
         }
     }
 
     /**
-     * 3. Ses mesajını çal
+     * Adim 3: Ses mesajini cal
+     * STREAM_MUSIC kanalindan hoparlore ses verir.
+     * Hoparlorden cikan ses, telefonun mikrofonu tarafindan alinir
+     * ve sebeke uzerinden arayan kisiye iletilir.
      */
     private fun playMessage() {
+        // Onceki oynatmayi temizle
+        stopCurrentPlayback()
+
+        // DTMF algilamayi baslat
+        startDtmfDetection()
+
         try {
-            // Önceki player'ı temizle
-            mediaPlayer?.apply {
-                try { if (isPlaying()) stop() } catch (_: Exception) {}
-                release()
-            }
-            mediaPlayer = null
-
-            // DTMF algılamayı başlat (mesaj çalarken de tuşa basabilsin)
-            startDtmfDetection()
-
-            mediaPlayer = if (prefs.usesCustomAudio && prefs.audioFilePath != null) {
+            if (prefs.usesCustomAudio && prefs.audioFilePath != null) {
                 val filePath = prefs.audioFilePath!!
-                Log.d(TAG, "Ozel ses dosyasi caliniyor: $filePath")
-                MediaPlayer().apply {
+                Log.d(TAG, "Ozel ses: $filePath")
+
+                mediaPlayer = MediaPlayer().apply {
+                    // STREAM_MUSIC kullan - eko filtresinden etkilenmez!
                     setAudioAttributes(
                         AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                             .build()
                     )
                     if (filePath.startsWith("content://")) {
@@ -196,31 +204,26 @@ class AutoAnswerService : Service() {
                         setDataSource(filePath)
                     }
                     prepare()
+                    setVolume(1.0f, 1.0f) // Maksimum volume
+                    setOnCompletionListener {
+                        Log.d(TAG, "Mesaj bitti")
+                        isMessagePlaying = false
+                        onMessageFinished()
+                    }
+                    setOnErrorListener { _, w, e ->
+                        Log.e(TAG, "MediaPlayer hata: $w/$e")
+                        isMessagePlaying = false
+                        onMessageFinished()
+                        true
+                    }
+                    start()
+                    isMessagePlaying = true
+                    Log.d(TAG, ">>> SES MESAJI CALINIYOR (STREAM_MUSIC -> HOPARLOR -> MIKROFON -> ARAYAN)")
                 }
-            } else {
-                Log.d(TAG, "Varsayilan ses mesaji caliniyor")
-                MediaPlayer.create(this, R.raw.varsayilan_mesaj)?.apply {
-                    setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build()
-                    )
-                }
-            }
 
-            mediaPlayer?.apply {
-                setOnCompletionListener {
-                    Log.d(TAG, "Ses mesaji tamamlandi, tus bekleniyor...")
-                    onMessageFinished()
-                }
-                setOnErrorListener { _, what, extra ->
-                    Log.e(TAG, "MediaPlayer hatasi: what=$what, extra=$extra")
-                    onMessageFinished()
-                    true
-                }
-                start()
-                this@AutoAnswerService.isPlaying = true
+            } else {
+                Log.w(TAG, "Ses dosyasi yok!")
+                onMessageFinished()
             }
 
         } catch (e: Exception) {
@@ -229,278 +232,186 @@ class AutoAnswerService : Service() {
         }
     }
 
-    /**
-     * 4. Mesaj bitti - tuş bekleme moduna geç
-     */
-    private fun onMessageFinished() {
-        isPlaying = false
-        Log.d(TAG, "Mesaj bitti - DTMF tus bekleniyor (30 sn timeout)")
-
-        // Otomatik bağlanma zamanlayıcı başlat
-        // Hiçbir tuşa basılmazsa belirli süre sonra eczaneye bağla
-        handler.postDelayed({
-            if (!isConnectedToPharmacist) {
-                Log.d(TAG, "Timeout - otomatik eczaneye baglaniyor")
-                connectToPharmacist()
-            }
-        }, AUTO_CONNECT_TIMEOUT_MS)
-    }
-
-    // ========================
-    // DTMF TUŞ ALGILAMA
-    // ========================
-
-    /**
-     * DTMF dinlemeyi başlat
-     */
-    private fun startDtmfDetection() {
-        dtmfDetector?.stopListening()
-
-        dtmfDetector = DtmfDetector { key ->
-            Log.d(TAG, "DTMF tus algilandi: $key")
-            handler.post {
-                handleDtmfKey(key)
-            }
-        }
-        dtmfDetector?.startListening()
-    }
-
-    /**
-     * Algılanan DTMF tuşunu işle
-     */
-    private fun handleDtmfKey(key: Char) {
-        when (key) {
-            '1' -> {
-                // 1'e basıldı → Mesajı tekrar çal
-                Log.d(TAG, "1'e basildi - mesaj tekrar caliniyor")
-                handler.removeCallbacksAndMessages(null) // Timeout'u iptal et
-                playMessage()
-            }
-            '2' -> {
-                // 2'ye basıldı → Eczaneye bağla
-                Log.d(TAG, "2'ye basildi - eczaneye baglaniyor")
-                handler.removeCallbacksAndMessages(null) // Timeout'u iptal et
-                connectToPharmacist()
-            }
-        }
-    }
-
-    // ========================
-    // ECZANEYE BAĞLAMA
-    // ========================
-
-    /**
-     * Arayan kişiyi eczaneye bağla.
-     * Hoparlörü kapatır, DTMF'i durdurur, eczacıyı uyarır.
-     */
-    private fun connectToPharmacist() {
-        if (isConnectedToPharmacist) return
-        isConnectedToPharmacist = true
-
-        Log.d(TAG, "Eczaneye baglama basladi")
-
-        // Çalan mesajı durdur
+    private fun stopCurrentPlayback() {
         try {
             mediaPlayer?.apply {
                 if (isPlaying) stop()
                 release()
             }
-            mediaPlayer = null
-        } catch (e: Exception) {
-            Log.e(TAG, "MediaPlayer durdurma hatasi", e)
-        }
-        isPlaying = false
+        } catch (_: Exception) {}
+        mediaPlayer = null
+        isMessagePlaying = false
+    }
 
-        // DTMF algılamayı durdur
+    /**
+     * Mesaj bittikten sonra tus bekleme
+     */
+    private fun onMessageFinished() {
+        Log.d(TAG, "Tus bekleniyor (1=tekrar, 2=baglan) - 30sn timeout")
+
+        handler.postDelayed({
+            if (!isConnectedToPharmacist) {
+                Log.d(TAG, "Timeout - otomatik baglaniyor")
+                connectToPharmacist()
+            }
+        }, AUTO_CONNECT_TIMEOUT_MS)
+    }
+
+    // ========================================
+    // DTMF TUS ALGILAMA
+    // ========================================
+
+    private fun startDtmfDetection() {
+        dtmfDetector?.stopListening()
+        dtmfDetector = DtmfDetector { key ->
+            Log.d(TAG, "DTMF: $key")
+            handler.post { handleDtmfKey(key) }
+        }
+        dtmfDetector?.startListening()
+    }
+
+    private fun handleDtmfKey(key: Char) {
+        when (key) {
+            '1' -> {
+                Log.d(TAG, ">>> 1 - TEKRAR")
+                handler.removeCallbacksAndMessages(null)
+                playMessage()
+            }
+            '2' -> {
+                Log.d(TAG, ">>> 2 - BAGLAN")
+                handler.removeCallbacksAndMessages(null)
+                connectToPharmacist()
+            }
+        }
+    }
+
+    // ========================================
+    // ECZANEYE BAGLAMA
+    // ========================================
+
+    private fun connectToPharmacist() {
+        if (isConnectedToPharmacist) return
+        isConnectedToPharmacist = true
+
+        // Mesaji durdur
+        stopCurrentPlayback()
+
+        // DTMF durdur
         dtmfDetector?.stopListening()
         dtmfDetector = null
 
-        // Hoparlörü kapat - normal görüşme moduna geç
+        // Hoparloru kapat - normal kulaklik moduna gec
         try {
             audioManager.isSpeakerphoneOn = false
-            audioManager.mode = AudioManager.MODE_IN_CALL
-        } catch (e: Exception) {
-            Log.e(TAG, "Hoparlor kapatma hatasi", e)
-        }
+        } catch (_: Exception) {}
 
-        // Eczacıyı uyar - titreşim
+        // Eczaciyi uyar
         vibratePhone()
-
-        // Bildirim gönder
         sendAlertNotification()
-
-        Log.d(TAG, "Eczaneye baglandi - eczaci telefonu devralabilir")
+        Log.d(TAG, "Eczaneye baglandi")
     }
 
-    // ========================
-    // WHATSAPP KONUM GÖNDERME
-    // ========================
+    // ========================================
+    // WHATSAPP
+    // ========================================
 
-    /**
-     * Mesaj çalarken otomatik olarak WhatsApp konum bildirimi gönder
-     */
     private fun sendWhatsAppLocationAuto() {
-        if (whatsappSent) return
-        if (!prefs.whatsappEnabled) return
-        if (!prefs.hasLocation) return
+        if (whatsappSent || !prefs.whatsappEnabled || !prefs.hasLocation) return
         if (currentCallerNumber.isEmpty() || currentCallerNumber == "Bilinmeyen") return
-
         whatsappSent = true
-        // Bildirim gönder (eczacı tıklayınca WhatsApp açılır)
         sendWhatsAppNotification(currentCallerNumber)
     }
 
-    // ========================
-    // BİLDİRİMLER
-    // ========================
+    // ========================================
+    // BILDIRIMLER
+    // ========================================
 
     private fun vibratePhone() {
         try {
-            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-                vm.defaultVibrator
+            val v = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
             } else {
                 @Suppress("DEPRECATION")
                 getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
             }
-            val pattern = longArrayOf(0, 500, 200, 500, 200, 800, 200, 500)
-            vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
-        } catch (e: Exception) {
-            Log.e(TAG, "Titresim hatasi", e)
-        }
+            v.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500, 200, 800), -1))
+        } catch (_: Exception) {}
     }
 
     private fun sendAlertNotification() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val openIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ALERT)
+        nm.notify(ALERT_NOTIFICATION_ID, NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ALERT)
             .setContentTitle("Arayan Kisi Hatta!")
-            .setContentText("Mesaj dinletildi. Arayan kisi eczaneye baglanmak istiyor.")
+            .setContentText("Mesaj dinletildi. Telefonu devralin.")
             .setSmallIcon(R.drawable.ic_phone)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(PendingIntent.getActivity(this, 0,
+                Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setAutoCancel(true)
-            .build()
-        nm.notify(ALERT_NOTIFICATION_ID, notification)
+            .build())
     }
 
     private fun sendWhatsAppNotification(phoneNumber: String) {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val masked = if (phoneNumber.length > 4) "***${phoneNumber.takeLast(4)}" else phoneNumber
 
-        val whatsappIntent = Intent(this, AutoAnswerService::class.java).apply {
-            action = ACTION_SEND_WHATSAPP
-            putExtra(EXTRA_PHONE_NUMBER, phoneNumber)
-        }
-        val whatsappPendingIntent = PendingIntent.getService(
-            this, 100, whatsappIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val directMessage = WhatsAppHelper.buildMessage(prefs)
-        val directIntent = WhatsAppHelper.createWhatsAppIntent(phoneNumber, directMessage)
-        val directPendingIntent = PendingIntent.getActivity(
-            this, 101, directIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val maskedNumber = if (phoneNumber.length > 4) "***${phoneNumber.takeLast(4)}" else phoneNumber
-
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_WHATSAPP)
-            .setContentTitle("Konum Gonder - $maskedNumber")
-            .setContentText("Tiklayin: Arayan kisiye eczane konumunu WhatsApp ile gonderin")
+        nm.notify(WHATSAPP_NOTIFICATION_ID, NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_WHATSAPP)
+            .setContentTitle("Konum Gonder - $masked")
+            .setContentText("Arayan kisiye WhatsApp ile konum gonderin")
             .setSmallIcon(R.drawable.ic_phone)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(directPendingIntent)
+            .setContentIntent(PendingIntent.getActivity(this, 101,
+                WhatsAppHelper.createWhatsAppIntent(phoneNumber, WhatsAppHelper.buildMessage(prefs)),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            .addAction(R.drawable.ic_phone, "WhatsApp Gonder",
+                PendingIntent.getService(this, 100,
+                    Intent(this, AutoAnswerService::class.java).apply {
+                        action = ACTION_SEND_WHATSAPP
+                        putExtra(EXTRA_PHONE_NUMBER, phoneNumber)
+                    },
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setAutoCancel(true)
-            .addAction(R.drawable.ic_phone, "WhatsApp ile Gonder", whatsappPendingIntent)
-            .setStyle(
-                NotificationCompat.BigTextStyle().bigText(
-                    "Arayan: $maskedNumber\n" +
-                    "${prefs.eczaneAdi} konumunu WhatsApp ile gondermek icin tiklayin."
-                )
-            )
-            .build()
-        nm.notify(WHATSAPP_NOTIFICATION_ID, notification)
-        Log.d(TAG, "WhatsApp konum bildirimi gonderildi: $maskedNumber")
+            .build())
     }
 
     private fun createForegroundNotification(phoneNumber: String): Notification {
-        val openIntent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Nobetci Eczane IVR - Aktif")
-            .setContentText("Gelen arama isleniyor: $phoneNumber")
+            .setContentTitle("Eczane Telesekreter Aktif")
+            .setContentText("Arama: $phoneNumber")
             .setSmallIcon(R.drawable.ic_phone)
             .setOngoing(true)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(PendingIntent.getActivity(this, 0,
+                Intent(this, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .build()
     }
 
     private fun createNotificationChannels() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-        nm.createNotificationChannel(
-            NotificationChannel(
-                NOTIFICATION_CHANNEL_ID, "Nobetci Eczane Servisi",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply { description = "Arka planda calisan nobetci eczane servisi" }
-        )
-        nm.createNotificationChannel(
-            NotificationChannel(
-                NOTIFICATION_CHANNEL_ALERT, "Arama Uyarilari",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Arayan kisi baglanmak istediginde gelen uyarilar"
-                enableVibration(true)
-            }
-        )
-        nm.createNotificationChannel(
-            NotificationChannel(
-                NOTIFICATION_CHANNEL_WHATSAPP, "WhatsApp Konum",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "WhatsApp ile konum gonderme bildirimleri"
-                enableVibration(true)
-            }
-        )
+        nm.createNotificationChannel(NotificationChannel(
+            NOTIFICATION_CHANNEL_ID, "Eczane Telesekreter", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(
+            NOTIFICATION_CHANNEL_ALERT, "Arama Uyarilari", NotificationManager.IMPORTANCE_HIGH
+        ).apply { enableVibration(true) })
+        nm.createNotificationChannel(NotificationChannel(
+            NOTIFICATION_CHANNEL_WHATSAPP, "WhatsApp Konum", NotificationManager.IMPORTANCE_HIGH
+        ).apply { enableVibration(true) })
     }
 
-    // ========================
-    // TEMİZLİK
-    // ========================
+    // ========================================
+    // TEMIZLIK
+    // ========================================
 
     private fun cleanup() {
         handler.removeCallbacksAndMessages(null)
-
         dtmfDetector?.stopListening()
         dtmfDetector = null
-
-        try {
-            mediaPlayer?.apply {
-                try { if (isPlaying()) stop() } catch (_: Exception) {}
-                release()
-            }
-            mediaPlayer = null
-        } catch (e: Exception) {
-            Log.e(TAG, "MediaPlayer temizleme hatasi", e)
-        }
-
+        stopCurrentPlayback()
         try {
             audioManager.isSpeakerphoneOn = false
             audioManager.mode = AudioManager.MODE_NORMAL
-        } catch (e: Exception) {
-            Log.e(TAG, "Ses ayarlari sifirlama hatasi", e)
-        }
-
-        isPlaying = false
+        } catch (_: Exception) {}
         isConnectedToPharmacist = false
     }
 
