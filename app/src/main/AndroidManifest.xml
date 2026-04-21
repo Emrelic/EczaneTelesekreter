@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Telefon durumunu okuma -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Aramayı cevaplama -->
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <!-- Ses çalma ve hoparlör kontrolü -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Ön planda çalışma -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <!-- Titreşim -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Bildirim -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Kilit ekranında çalışma -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Ses kaydı için (kullanıcı kendi mesajını kaydetmek isterse) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Konum (eczane GPS konumu almak için) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Dosya erişimi (ses dosyası seçmek için) -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@drawable/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.NobetciEczane"
+        tools:targetApi="34">
+
+        <!-- Ana Ekran -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Ses Kayıt Ekranı -->
+        <activity
+            android:name=".ui.RecordMessageActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <!-- Yapay Zeka Ses Oluşturma Ekranı -->
+        <activity
+            android:name=".ui.TtsMessageActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <!-- Ayarlar Ekranı -->
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <!-- Gelen arama algılayıcı -->
+        <receiver
+            android:name=".receiver.CallReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Arka plan servisi -->
+        <service
+            android:name=".service.AutoAnswerService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall" />
+
+        <!-- Call Screening Service (Android 7+) -->
+        <service
+            android:name=".service.EczaneCallScreeningService"
+            android:permission="android.permission.BIND_SCREENING_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.CallScreeningService" />
+            </intent-filter>
+        </service>
+
+    </application>
+
+</manifest>

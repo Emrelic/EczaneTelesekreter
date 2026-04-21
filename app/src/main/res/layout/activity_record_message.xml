@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:background="#F5F5F5">
+
+    <!-- Bilgi -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Arayan kişilere dinletilecek mesajı kaydedin."
+        android:textSize="16sp"
+        android:textColor="#333333"
+        android:paddingBottom="8dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Örnek mesaj:\n'Merhaba, ... Eczanesi nöbetçi olarak hizmetinizdedir. Adresimiz ... sokak, No: ... Canlı kişiye bağlanmak istiyorsanız lütfen hatta bekleyiniz.'"
+        android:textSize="13sp"
+        android:textColor="#666666"
+        android:background="#E3F2FD"
+        android:padding="12dp"
+        android:layout_marginBottom="24dp" />
+
+    <!-- Durum -->
+    <TextView
+        android:id="@+id/tvStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Kayıt yok - Kaydet butonuna basın"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:textColor="#333333"
+        android:gravity="center"
+        android:paddingBottom="8dp" />
+
+    <!-- Zamanlayıcı -->
+    <TextView
+        android:id="@+id/tvTimer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="00:00"
+        android:textSize="48sp"
+        android:textColor="#1B5E20"
+        android:gravity="center"
+        android:fontFamily="monospace"
+        android:paddingTop="16dp"
+        android:paddingBottom="32dp" />
+
+    <!-- Kayıt Butonları -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:paddingBottom="16dp">
+
+        <Button
+            android:id="@+id/btnRecord"
+            android:layout_width="0dp"
+            android:layout_height="60dp"
+            android:layout_weight="1"
+            android:text="Kayıt Başlat"
+            android:backgroundTint="#D32F2F"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:layout_marginEnd="8dp" />
+
+        <Button
+            android:id="@+id/btnStop"
+            android:layout_width="0dp"
+            android:layout_height="60dp"
+            android:layout_weight="1"
+            android:text="Durdur"
+            android:backgroundTint="#616161"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:enabled="false" />
+
+    </LinearLayout>
+
+    <!-- Kontrol Butonları -->
+    <Button
+        android:id="@+id/btnPlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="▶ Dinle"
+        android:backgroundTint="#1565C0"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:enabled="false"
+        android:layout_marginBottom="8dp" />
+
+    <Button
+        android:id="@+id/btnSave"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Bu Mesajı Kullan"
+        android:backgroundTint="#1B5E20"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:enabled="false"
+        android:layout_marginBottom="8dp" />
+
+    <Button
+        android:id="@+id/btnDelete"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Kaydı Sil"
+        android:backgroundTint="#BF360C"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:enabled="false" />
+
+</LinearLayout>
