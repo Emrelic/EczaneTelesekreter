@@ -8,77 +8,71 @@ import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.util.Log
-import java.io.File
-import java.nio.ByteBuffer
 
 /**
- * Ses dosyasını doğrudan telefon görüşmesi kanalına (uplink) yönlendiren oynatıcı.
+ * Ses dosyasini telefon gorusmesi sirasinda arayan kisiye dinletir.
  *
- * Normal MediaPlayer hoparlörden çalar ve arayan kişi duyamaz.
- * Bu sınıf AudioTrack + USAGE_VOICE_COMMUNICATION kullanarak
- * sesi doğrudan arayan kişinin duyacağı kanala yazar.
+ * Yontem: AudioTrack ile STREAM_VOICE_CALL kanalina PCM veri yazar.
+ * Bu kanal, gorusme sirasinda arayan kisinin duydugu ses kanalidir.
+ * (ToneGenerator DTMF tonlarini ayni kanaldan gonderir ve arayan duyar)
  *
- * Çalışma prensibi:
- * 1. MediaExtractor + MediaCodec ile ses dosyasını PCM'e decode eder
- * 2. AudioTrack (VOICE_COMMUNICATION) ile PCM veriyi arama kanalına yazar
- * 3. Android ses sistemi bu veriyi arama uplink'ine karıştırır
+ * Eko filtresi devre disi birakilir, boylece ses engellenmez.
+ *
+ * AudioManager modu DEGISTIRILMEZ - sistem MODE_IN_CALL modunda kalir.
  */
 class CallAudioPlayer(private val context: Context) {
 
     companion object {
         private const val TAG = "CallAudioPlayer"
-        private const val SAMPLE_RATE = 16000 // 16kHz - telefon kalitesi
         private const val TIMEOUT_US = 10000L
     }
 
     private var audioTrack: AudioTrack? = null
     private var playbackThread: Thread? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+
     @Volatile
     private var isPlaying = false
-    private var onComplete: (() -> Unit)? = null
-    private var onError: ((String) -> Unit)? = null
 
     /**
-     * Ses dosyasını arama kanalından çal.
-     * Arayan kişi bu sesi doğrudan duyar.
-     *
-     * @param filePath Ses dosyası yolu (WAV, M4A, MP3, vb.)
-     * @param onComplete Çalma bittiğinde
-     * @param onError Hata olduğunda
+     * Ses dosyasini gorusme kanalinda cal.
      */
     fun play(
         filePath: String,
         onComplete: () -> Unit,
         onError: (String) -> Unit
     ) {
-        this.onComplete = onComplete
-        this.onError = onError
-
-        if (isPlaying) {
-            stop()
-        }
+        stop()
 
         playbackThread = Thread {
             try {
-                playInternal(filePath)
+                playInternal(filePath, onComplete, onError)
             } catch (e: Exception) {
                 Log.e(TAG, "Oynatma hatasi", e)
-                onError(e.message ?: "Bilinmeyen hata")
+                onError(e.message ?: "Hata")
             }
         }.apply {
-            name = "CallAudioPlayerThread"
+            name = "CallAudioThread"
             isDaemon = true
             start()
         }
     }
 
-    private fun playInternal(filePath: String) {
+    @Suppress("DEPRECATION")
+    private fun playInternal(
+        filePath: String,
+        onComplete: () -> Unit,
+        onError: (String) -> Unit
+    ) {
         val extractor = MediaExtractor()
 
         try {
-            // Dosyayı aç
+            // Ses dosyasini ac
             if (filePath.startsWith("content://")) {
                 extractor.setDataSource(context, Uri.parse(filePath), null)
             } else {
@@ -86,119 +80,103 @@ class CallAudioPlayer(private val context: Context) {
             }
 
             // Ses track'ini bul
-            var audioTrackIndex = -1
-            var inputFormat: MediaFormat? = null
+            var trackIndex = -1
+            var format: MediaFormat? = null
             for (i in 0 until extractor.trackCount) {
-                val format = extractor.getTrackFormat(i)
-                val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
-                if (mime.startsWith("audio/")) {
-                    audioTrackIndex = i
-                    inputFormat = format
+                val f = extractor.getTrackFormat(i)
+                if ((f.getString(MediaFormat.KEY_MIME) ?: "").startsWith("audio/")) {
+                    trackIndex = i
+                    format = f
                     break
                 }
             }
 
-            if (audioTrackIndex == -1 || inputFormat == null) {
-                onError?.invoke("Ses dosyasinda ses kanali bulunamadi")
+            if (trackIndex == -1 || format == null) {
+                onError("Ses kanali bulunamadi")
                 return
             }
 
-            extractor.selectTrack(audioTrackIndex)
+            extractor.selectTrack(trackIndex)
 
-            val mime = inputFormat.getString(MediaFormat.KEY_MIME) ?: ""
-            val sampleRate = inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-            val channelCount = inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+            val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            Log.d(TAG, "Format: $mime, ${sampleRate}Hz, ${channelCount}ch")
 
-            Log.d(TAG, "Ses format: mime=$mime, rate=$sampleRate, channels=$channelCount")
-
-            // MediaCodec ile decode et
+            // Codec ile decode
             val codec = MediaCodec.createDecoderByType(mime)
-            codec.configure(inputFormat, null, null, 0)
+            codec.configure(format, null, null, 0)
             codec.start()
 
-            // AudioTrack oluştur - VOICE_COMMUNICATION ile arama kanalına yaz
             val channelConfig = if (channelCount == 1)
-                AudioFormat.CHANNEL_OUT_MONO
-            else
-                AudioFormat.CHANNEL_OUT_STEREO
+                AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
 
-            val minBufferSize = AudioTrack.getMinBufferSize(
-                sampleRate,
-                channelConfig,
-                AudioFormat.ENCODING_PCM_16BIT
+            val bufSize = AudioTrack.getMinBufferSize(
+                sampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT
             )
 
-            audioTrack = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(channelConfig)
-                        .build()
-                )
-                .setBufferSizeInBytes(minBufferSize * 4)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
+            // ============================================
+            // YONTEM 1: AudioTrack + STREAM_VOICE_CALL
+            // ToneGenerator ile ayni kanal - arayan duyar
+            // ============================================
+            audioTrack = AudioTrack(
+                AudioManager.STREAM_VOICE_CALL,  // Gorusme ses kanali
+                sampleRate,
+                channelConfig,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufSize * 4,
+                AudioTrack.MODE_STREAM
+            )
+
+            val sessionId = audioTrack!!.audioSessionId
+
+            // ============================================
+            // EKO FILTRESINI DEVRE DISI BIRAK
+            // Yoksa telefon hoparlor sesini filtreler
+            // ============================================
+            disableEchoCancellation(sessionId)
 
             audioTrack?.play()
             isPlaying = true
+            Log.d(TAG, ">>> VOICE_CALL kanalina ses yaziliyor (session=$sessionId)")
 
-            Log.d(TAG, "AudioTrack baslatildi - ses arama kanalina yonlendirilecek")
-
-            // Decode ve oynat döngüsü
+            // Decode ve yaz dongusu
             val bufferInfo = MediaCodec.BufferInfo()
             var inputDone = false
 
             while (isPlaying) {
-                // Input: Compressed veriyi codec'e ver
+                // Compressed -> Codec
                 if (!inputDone) {
-                    val inputBufferIndex = codec.dequeueInputBuffer(TIMEOUT_US)
-                    if (inputBufferIndex >= 0) {
-                        val inputBuffer = codec.getInputBuffer(inputBufferIndex) ?: continue
-                        val sampleSize = extractor.readSampleData(inputBuffer, 0)
-
-                        if (sampleSize < 0) {
-                            codec.queueInputBuffer(
-                                inputBufferIndex, 0, 0, 0,
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                            )
+                    val inIdx = codec.dequeueInputBuffer(TIMEOUT_US)
+                    if (inIdx >= 0) {
+                        val inBuf = codec.getInputBuffer(inIdx) ?: continue
+                        val size = extractor.readSampleData(inBuf, 0)
+                        if (size < 0) {
+                            codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                             inputDone = true
                         } else {
-                            codec.queueInputBuffer(
-                                inputBufferIndex, 0, sampleSize,
-                                extractor.sampleTime, 0
-                            )
+                            codec.queueInputBuffer(inIdx, 0, size, extractor.sampleTime, 0)
                             extractor.advance()
                         }
                     }
                 }
 
-                // Output: Decoded PCM veriyi AudioTrack'e yaz
-                val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
-                if (outputBufferIndex >= 0) {
+                // Decoded PCM -> AudioTrack (VOICE_CALL)
+                val outIdx = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+                if (outIdx >= 0) {
                     if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        // Dosya bitti
-                        Log.d(TAG, "Ses dosyasi bitti")
-                        codec.releaseOutputBuffer(outputBufferIndex, false)
+                        codec.releaseOutputBuffer(outIdx, false)
                         break
                     }
-
-                    val outputBuffer = codec.getOutputBuffer(outputBufferIndex)
-                    if (outputBuffer != null && bufferInfo.size > 0) {
-                        val pcmData = ByteArray(bufferInfo.size)
-                        outputBuffer.get(pcmData)
-                        outputBuffer.clear()
-
-                        // PCM veriyi arama kanalına yaz
-                        audioTrack?.write(pcmData, 0, pcmData.size)
+                    val outBuf = codec.getOutputBuffer(outIdx)
+                    if (outBuf != null && bufferInfo.size > 0) {
+                        val pcm = ByteArray(bufferInfo.size)
+                        outBuf.get(pcm)
+                        outBuf.clear()
+                        // VOICE_CALL kanalina yaz -> arayan kisiye gider
+                        audioTrack?.write(pcm, 0, pcm.size)
                     }
-                    codec.releaseOutputBuffer(outputBufferIndex, false)
+                    codec.releaseOutputBuffer(outIdx, false)
                 }
             }
 
@@ -206,46 +184,70 @@ class CallAudioPlayer(private val context: Context) {
             codec.stop()
             codec.release()
             extractor.release()
-
+            releaseAudioEffects()
             audioTrack?.stop()
             audioTrack?.release()
             audioTrack = null
-
             isPlaying = false
 
-            if (isPlaying) {
-                // Kullanıcı durdurdu
-                Log.d(TAG, "Oynatma kullanici tarafindan durduruldu")
-            } else {
-                Log.d(TAG, "Oynatma tamamlandi")
-                onComplete?.invoke()
-            }
+            Log.d(TAG, "Oynatma tamamlandi")
+            onComplete()
 
         } catch (e: Exception) {
-            Log.e(TAG, "Ses oynatma hatasi", e)
+            Log.e(TAG, "Hata", e)
             extractor.release()
+            releaseAudioEffects()
             isPlaying = false
-            onError?.invoke(e.message ?: "Ses oynatma hatasi")
+            onError(e.message ?: "Hata")
         }
     }
 
     /**
-     * Oynatmayı durdur
+     * Eko filtresini ve gurultu bastiriciyi devre disi birak.
+     * Boylece hoparlorden/audiotrack'ten gelen ses
+     * mikrofon tarafindan filtrelenmez.
      */
+    private fun disableEchoCancellation(audioSessionId: Int) {
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = AcousticEchoCanceler.create(audioSessionId)?.apply {
+                    enabled = false
+                    Log.d(TAG, "Eko filtresi DEVRE DISI")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Eko filtresi devre disi birakilamadi", e)
+        }
+
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
+                    enabled = false
+                    Log.d(TAG, "Gurultu bastiricisi DEVRE DISI")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Gurultu bastiricisi devre disi birakilamadi", e)
+        }
+    }
+
+    private fun releaseAudioEffects() {
+        try { echoCanceler?.release() } catch (_: Exception) {}
+        try { noiseSuppressor?.release() } catch (_: Exception) {}
+        echoCanceler = null
+        noiseSuppressor = null
+    }
+
     fun stop() {
         isPlaying = false
+        releaseAudioEffects()
         try {
             audioTrack?.stop()
             audioTrack?.release()
-            audioTrack = null
-        } catch (e: Exception) {
-            Log.e(TAG, "AudioTrack durdurma hatasi", e)
-        }
+        } catch (_: Exception) {}
+        audioTrack = null
         playbackThread = null
     }
 
-    /**
-     * Çalıyor mu?
-     */
     fun isCurrentlyPlaying(): Boolean = isPlaying
 }
