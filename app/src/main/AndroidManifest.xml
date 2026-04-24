@@ -4,6 +4,8 @@
 
     <!-- Telefon durumunu okuma -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Arama kayitlarini okuma (gelen numara icin gerekli) -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <!-- Aramayı cevaplama -->
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <!-- Ses çalma ve hoparlör kontrolü -->
@@ -11,12 +13,18 @@
     <!-- Ön planda çalışma -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Titreşim -->
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- Bildirim -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Kilit ekranında çalışma -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Arka plandan foreground service baslatabilmek icin (Android 12+) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Tam ekran bildirim (kilit ekrani + arka plandan FGS baslatma hakki) -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- Ses kaydı için (kullanıcı kendi mesajını kaydetmek isterse) -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Konum (eczane GPS konumu almak için) -->
@@ -78,7 +86,7 @@
         <service
             android:name=".service.AutoAnswerService"
             android:exported="false"
-            android:foregroundServiceType="phoneCall" />
+            android:foregroundServiceType="phoneCall|microphone|mediaPlayback" />
 
         <!-- Call Screening Service (Android 7+) -->
         <service

@@ -4,8 +4,10 @@ import android.Manifest
 import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -39,6 +41,7 @@ class MainActivity : AppCompatActivity() {
 
     private val requiredPermissions = mutableListOf(
         Manifest.permission.READ_PHONE_STATE,
+        Manifest.permission.READ_CALL_LOG,
         Manifest.permission.ANSWER_PHONE_CALLS,
         Manifest.permission.MODIFY_AUDIO_SETTINGS,
         Manifest.permission.VIBRATE,
@@ -60,6 +63,7 @@ class MainActivity : AppCompatActivity() {
         prefs = PrefsManager(this)
         initViews()
         checkPermissions()
+        requestOverlayPermission()
         requestCallScreeningRole()
     }
 
@@ -162,9 +166,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hasAllPermissions(): Boolean {
-        return requiredPermissions.all {
+        val runtimeOk = requiredPermissions.all {
             ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
+        val overlayOk = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(this) else true
+        return runtimeOk && overlayOk
     }
 
     private fun checkPermissions() {
@@ -173,6 +179,14 @@ class MainActivity : AppCompatActivity() {
         }
         if (missing.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSIONS_REQUEST_CODE)
+        }
+    }
+
+    private fun requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Arka planda arama cevaplayabilmek icin 'Diger uygulamalarin uzerinde goster' iznini verin", Toast.LENGTH_LONG).show()
+            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            startActivity(intent)
         }
     }
 

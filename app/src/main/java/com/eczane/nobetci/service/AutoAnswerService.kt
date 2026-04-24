@@ -7,10 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.media.AudioAttributes
 import android.media.AudioManager
-import android.media.MediaPlayer
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -31,16 +28,9 @@ import com.eczane.nobetci.util.WhatsAppHelper
 /**
  * Eczane Telesekreter IVR Servisi.
  *
- * Ses iletim stratejisi (cift katmanli):
- *
- * Katman 1 - DOGRUDAN: AudioTrack ile STREAM_VOICE_CALL kanalina
- *   PCM veri yazilir. ToneGenerator ile ayni kanal. Eko filtresi
- *   devre disi birakilir.
- *
- * Katman 2 - YEDEK: Hoparlor acilir, MediaPlayer ile STREAM_MUSIC
- *   kanalindan ses calinir. Mikrofon sesi alip sebekeye iletir.
- *
- * Her iki yontem ayni anda calisir, en az biri arayan kisiye ulasir.
+ * MODE_IN_COMMUNICATION + AudioTrack(USAGE_VOICE_COMMUNICATION)
+ * ile arayan kisiye ses dosyasi dinletir.
+ * Hoparlor ve mikrofon kullanmadan dogrudan sebeke uplink'ine yazar.
  */
 class AutoAnswerService : Service() {
 
@@ -58,15 +48,13 @@ class AutoAnswerService : Service() {
         private const val ALERT_NOTIFICATION_ID = 1002
         private const val WHATSAPP_NOTIFICATION_ID = 1003
 
-        private const val ANSWER_DELAY_MS = 1500L
-        private const val SETUP_DELAY_MS = 2500L  // Arama tam baglansın
+        private const val ANSWER_DELAY_MS = 500L
+        private const val SETUP_DELAY_MS = 1000L  // Arama tam baglansin
         private const val AUTO_CONNECT_TIMEOUT_MS = 30000L
     }
 
-    // Katman 1: Dogrudan VOICE_CALL kanalina yazma
+    // Dogrudan sebeke kanalina ses yazma
     private var callAudioPlayer: CallAudioPlayer? = null
-    // Katman 2: Hoparlor + MediaPlayer yedek
-    private var mediaPlayer: MediaPlayer? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var audioManager: AudioManager
@@ -134,44 +122,16 @@ class AutoAnswerService : Service() {
         }
     }
 
-    /**
-     * Ses kanallarini kur ve mesaji cal.
-     * ONEMLI: AudioManager.mode DEGISTIRILMEZ!
-     * Sistem MODE_IN_CALL modunda kalmali.
-     */
     private fun setupAndPlay() {
         try {
-            // Hoparloru ac (Katman 2 icin + ses seviyesi icin)
-            audioManager.isSpeakerphoneOn = true
-
-            // Tum ses kanallarini MAKSIMUMA cek
-            setMaxVolume(AudioManager.STREAM_VOICE_CALL)
-            setMaxVolume(AudioManager.STREAM_MUSIC)
-            setMaxVolume(AudioManager.STREAM_SYSTEM)
-
-            Log.d(TAG, "Hoparlor ACIK, sesler MAKSIMUM, AudioMode=${audioManager.mode}")
-            Log.d(TAG, ">>> CIFT KATMANLI SES BASLATILIYOR <<<")
-
+            Log.d(TAG, "AudioMode=${audioManager.mode}")
             playMessage()
             sendWhatsAppLocationAuto()
-
         } catch (e: Exception) {
             Log.e(TAG, "Ses kurulum hatasi", e)
         }
     }
 
-    private fun setMaxVolume(stream: Int) {
-        try {
-            val max = audioManager.getStreamMaxVolume(stream)
-            audioManager.setStreamVolume(stream, max, 0)
-        } catch (_: Exception) {}
-    }
-
-    /**
-     * Ses mesajini cift katmanli olarak cal:
-     * Katman 1: CallAudioPlayer -> STREAM_VOICE_CALL (dogrudan)
-     * Katman 2: MediaPlayer -> STREAM_MUSIC + hoparlor (yedek)
-     */
     private fun playMessage() {
         stopCurrentPlayback()
         startDtmfDetection()
@@ -180,53 +140,19 @@ class AutoAnswerService : Service() {
 
         Log.d(TAG, "Ses dosyasi: $filePath")
 
-        // ============================
-        // KATMAN 1: VOICE_CALL kanali
-        // AudioTrack ile dogrudan arama kanalina yaz
-        // ============================
         callAudioPlayer = CallAudioPlayer(this)
         callAudioPlayer?.play(
             filePath = filePath,
             onComplete = {
                 handler.post {
-                    Log.d(TAG, "Katman1 (VOICE_CALL) tamamlandi")
+                    Log.d(TAG, "Ses oynatma tamamlandi")
                     onMessageFinished()
                 }
             },
             onError = { err ->
-                Log.e(TAG, "Katman1 hata: $err")
+                Log.e(TAG, "Ses hatasi: $err")
             }
         )
-
-        // ============================
-        // KATMAN 2: STREAM_MUSIC + hoparlor
-        // Eko filtresi engelleyebilir ama yedek olarak calisir
-        // ============================
-        try {
-            mediaPlayer = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                )
-                if (filePath.startsWith("content://")) {
-                    setDataSource(this@AutoAnswerService, Uri.parse(filePath))
-                } else {
-                    setDataSource(filePath)
-                }
-                prepare()
-                setVolume(1.0f, 1.0f)
-                setOnCompletionListener {
-                    Log.d(TAG, "Katman2 (MUSIC) tamamlandi")
-                    // onComplete zaten Katman1'den gelecek
-                }
-                start()
-                Log.d(TAG, "Katman2 (STREAM_MUSIC -> HOPARLOR) baslatildi")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Katman2 hatasi: ${e.message}")
-        }
     }
 
     private fun getAudioFilePath(): String? {
@@ -251,13 +177,6 @@ class AutoAnswerService : Service() {
     private fun stopCurrentPlayback() {
         callAudioPlayer?.stop()
         callAudioPlayer = null
-        try {
-            mediaPlayer?.apply {
-                if (isPlaying) stop()
-                release()
-            }
-        } catch (_: Exception) {}
-        mediaPlayer = null
     }
 
     private fun onMessageFinished() {
@@ -310,7 +229,7 @@ class AutoAnswerService : Service() {
         dtmfDetector?.stopListening()
         dtmfDetector = null
 
-        try { audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
+        // Ses ayarlari CallAudioPlayer.stop() tarafindan geri yuklenir
 
         vibratePhone()
         sendAlertNotification()
@@ -402,7 +321,7 @@ class AutoAnswerService : Service() {
         handler.removeCallbacksAndMessages(null)
         dtmfDetector?.stopListening(); dtmfDetector = null
         stopCurrentPlayback()
-        try { audioManager.isSpeakerphoneOn = false; audioManager.mode = AudioManager.MODE_NORMAL } catch (_: Exception) {}
+        try { audioManager.mode = AudioManager.MODE_NORMAL } catch (_: Exception) {}
         isConnectedToPharmacist = false
     }
 

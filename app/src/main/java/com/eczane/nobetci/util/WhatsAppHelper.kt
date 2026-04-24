@@ -7,13 +7,7 @@ import android.net.Uri
 import android.util.Log
 
 /**
- * WhatsApp üzerinden konum ve mesaj gönderme yardımcı sınıfı.
- *
- * Arayan kişinin numarasına WhatsApp mesajı olarak:
- * - Eczane adı
- * - Adres
- * - Google Maps konum linki
- * gönderir.
+ * WhatsApp uzerinden konum ve mesaj gonderme yardimci sinifi.
  */
 object WhatsAppHelper {
 
@@ -21,15 +15,11 @@ object WhatsAppHelper {
     private const val WHATSAPP_PACKAGE = "com.whatsapp"
     private const val WHATSAPP_BUSINESS_PACKAGE = "com.whatsapp.w4b"
 
-    /**
-     * WhatsApp yüklü mü kontrol et
-     */
     fun isWhatsAppInstalled(context: Context): Boolean {
         return try {
             context.packageManager.getPackageInfo(WHATSAPP_PACKAGE, 0)
             true
         } catch (e: PackageManager.NameNotFoundException) {
-            // WhatsApp Business'ı dene
             try {
                 context.packageManager.getPackageInfo(WHATSAPP_BUSINESS_PACKAGE, 0)
                 true
@@ -39,21 +29,24 @@ object WhatsAppHelper {
         }
     }
 
-    /**
-     * Google Maps konum linki oluştur
-     */
+    private fun getWhatsAppPackage(context: Context): String {
+        return try {
+            context.packageManager.getPackageInfo(WHATSAPP_PACKAGE, 0)
+            WHATSAPP_PACKAGE
+        } catch (_: PackageManager.NameNotFoundException) {
+            WHATSAPP_BUSINESS_PACKAGE
+        }
+    }
+
     fun createMapsLink(latitude: Double, longitude: Double, label: String): String {
         val encodedLabel = Uri.encode(label)
         return "https://maps.google.com/maps?q=$latitude,$longitude($encodedLabel)"
     }
 
-    /**
-     * WhatsApp mesaj metni oluştur
-     */
     fun buildMessage(prefs: PrefsManager): String {
         val sb = StringBuilder()
 
-        sb.append("*${prefs.eczaneAdi} - Nöbetçi Eczane*\n\n")
+        sb.append("*${prefs.eczaneAdi} - Nobetci Eczane*\n\n")
 
         if (prefs.eczaneAdres.isNotEmpty()) {
             sb.append("Adres: ${prefs.eczaneAdres}\n\n")
@@ -63,7 +56,6 @@ object WhatsAppHelper {
             sb.append("Tel: ${prefs.eczaneTelefon}\n\n")
         }
 
-        // Konum linki
         if (prefs.hasLocation) {
             val mapsLink = createMapsLink(
                 prefs.eczaneLatitude,
@@ -73,34 +65,26 @@ object WhatsAppHelper {
             sb.append("Konum: $mapsLink\n\n")
         }
 
-        // Ek mesaj
         if (prefs.whatsappMessage.isNotEmpty()) {
             sb.append("${prefs.whatsappMessage}\n\n")
         }
 
-        sb.append("Geçmiş olsun, sağlıklı günler dileriz.")
+        sb.append("Gecmis olsun, saglikli gunler dileriz.")
 
         return sb.toString()
     }
 
-    /**
-     * Telefon numarasını uluslararası formata çevir.
-     * Örn: 05551234567 -> 905551234567
-     */
     fun formatPhoneNumber(phoneNumber: String): String {
         var cleaned = phoneNumber.replace(Regex("[^0-9+]"), "")
 
-        // Zaten + ile başlıyorsa sadece + işaretini kaldır
         if (cleaned.startsWith("+")) {
             return cleaned.removePrefix("+")
         }
 
-        // 0 ile başlıyorsa Türkiye kodu ekle
         if (cleaned.startsWith("0")) {
             cleaned = "90${cleaned.removePrefix("0")}"
         }
 
-        // Hiçbir ülke kodu yoksa Türkiye varsay
         if (!cleaned.startsWith("90") && cleaned.length == 10) {
             cleaned = "90$cleaned"
         }
@@ -109,14 +93,15 @@ object WhatsAppHelper {
     }
 
     /**
-     * WhatsApp ile mesaj gönderme Intent'i oluştur.
-     * Bu Intent, WhatsApp'ı doğrudan arayan kişinin sohbetinde açar.
+     * WhatsApp ile mesaj gonderme Intent'i olustur.
+     * vnd.android.cursor.item/vnd.com.whatsapp.profile ile
+     * dogrudan kisinin sohbetini acar ve mesaji yazar.
      */
     fun createWhatsAppIntent(phoneNumber: String, message: String): Intent {
         val formattedNumber = formatPhoneNumber(phoneNumber)
         val encodedMessage = Uri.encode(message)
 
-        // wa.me linki ile WhatsApp'ı aç
+        // wa.me linki ile WhatsApp'i ac - mesaj hazir gelir
         val uri = Uri.parse("https://wa.me/$formattedNumber?text=$encodedMessage")
 
         return Intent(Intent.ACTION_VIEW, uri).apply {
@@ -125,25 +110,49 @@ object WhatsAppHelper {
     }
 
     /**
-     * Belirli bir numaraya WhatsApp mesajı gönder.
-     * WhatsApp açılır, mesaj hazır olarak gelir, kullanıcı sadece gönder'e basar.
+     * WhatsApp API ile mesaji dogrudan gonder.
+     * Bu yontem mesaji WhatsApp'ta acar, kullanici sadece gonder tusuna basar.
+     *
+     * NOT: WhatsApp guvenlik kisitlamasi nedeniyle tam otomatik gonderim mumkun degildir.
+     * Kullanicinin 1 kez "Gonder" tusuna basmasi gerekir.
      */
     fun sendLocationMessage(context: Context, phoneNumber: String, prefs: PrefsManager): Boolean {
         return try {
             if (!isWhatsAppInstalled(context)) {
-                Log.e(TAG, "WhatsApp yüklü değil")
+                Log.e(TAG, "WhatsApp yuklu degil")
                 return false
             }
 
             val message = buildMessage(prefs)
-            val intent = createWhatsAppIntent(phoneNumber, message)
-            context.startActivity(intent)
+            val formattedNumber = formatPhoneNumber(phoneNumber)
+            val pkg = getWhatsAppPackage(context)
 
-            Log.d(TAG, "WhatsApp mesajı açıldı: $phoneNumber")
+            // Yontem: ACTION_SEND ile dogrudan WhatsApp'a gonder
+            // Bu yontem mesaji "Gonder" ekraninda hazir acar
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                setPackage(pkg)
+                putExtra(Intent.EXTRA_TEXT, message)
+                // Hedef numarayi belirle
+                putExtra("jid", "$formattedNumber@s.whatsapp.net")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+
+            context.startActivity(sendIntent)
+            Log.d(TAG, "WhatsApp mesaji acildi: $phoneNumber (ACTION_SEND + jid)")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "WhatsApp mesaj gönderme hatası", e)
-            false
+            Log.e(TAG, "WhatsApp ACTION_SEND hatasi, wa.me fallback deneniyor", e)
+            // Fallback: wa.me linki
+            try {
+                val message = buildMessage(prefs)
+                val intent = createWhatsAppIntent(phoneNumber, message)
+                context.startActivity(intent)
+                true
+            } catch (e2: Exception) {
+                Log.e(TAG, "WhatsApp tamamen basarisiz", e2)
+                false
+            }
         }
     }
 }
